@@ -1,0 +1,473 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum Role {
+  ADMIN
+  EDITOR
+  VIEWER
+}
+
+enum AuditAction {
+  CREATE
+  UPDATE
+  DELETE
+  MOVE
+  RESTORE
+  LOGIN
+  PERMISSION_GRANT
+  PERMISSION_REVOKE
+  PERMISSION_CHANGE
+  EXPORT
+  IMPORT
+  BACKUP
+  ROLE_CHANGE
+  REINDEX
+  ARCHIVE
+}
+
+enum AuditResourceType {
+  PAGE
+  SPACE
+  USER
+  COMMENT
+  PERMISSION
+  ATTACHMENT
+  TEMPLATE
+  TAG
+  INLINE_COMMENT
+  SYSTEM
+}
+
+model User {
+  id         String   @id @default(cuid())
+  email      String   @unique
+  name       String?
+  avatar     String?
+  role       Role     @default(VIEWER)
+  active     Boolean  @default(false)
+  department String?
+  createdAt  DateTime @default(now()) @map("created_at")
+  updatedAt  DateTime @updatedAt @map("updated_at")
+
+  spaces           Space[]
+  spacePermissions SpacePermission[]
+  pages            Page[]
+  pageVersions     PageVersion[]
+  pageFavorites    PageFavorite[]
+  comments         Comment[]
+  attachments      Attachment[]
+  activities       Activity[]
+  templates        Template[]
+  inlineComments   InlineComment[] @relation("InlineCommentAuthor")
+  pagePermissions  PagePermission[] @relation("PagePermissionUser")
+  pageWatches      PageWatch[]
+  pageViews        PageView[]
+  notifications    Notification[]
+  searchQueries    SearchQuery[]
+  pageReactions    PageReaction[]
+
+  @@map("users")
+}
+
+model Space {
+  id           String   @id @default(cuid())
+  name         String
+  slug         String   @unique
+  description  String?
+  icon         String?
+  isRestricted Boolean  @default(false) @map("is_restricted")
+  createdById  String   @map("created_by_id")
+  createdAt    DateTime @default(now()) @map("created_at")
+  updatedAt    DateTime @updatedAt @map("updated_at")
+
+  createdBy   User              @relation(fields: [createdById], references: [id])
+  permissions SpacePermission[]
+  pages       Page[]
+  attachments Attachment[]
+
+  @@map("spaces")
+}
+
+model SpacePermission {
+  id      String @id @default(cuid())
+  spaceId String @map("space_id")
+  userId  String @map("user_id")
+  role    Role   @default(VIEWER)
+
+  space Space @relation(fields: [spaceId], references: [id], onDelete: Cascade)
+  user  User  @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([spaceId, userId])
+  @@map("space_permissions")
+}
+
+model Page {
+  id        String   @id @default(cuid())
+  title     String
+  slug      String
+  content   Json     @default("{}")
+  spaceId   String   @map("space_id")
+  parentId  String?  @map("parent_id")
+  authorId  String   @map("author_id")
+  order     Int      @default(0)
+  yjsState  Bytes?    @map("yjs_state")
+  deletedAt  DateTime? @map("deleted_at")
+  archivedAt DateTime? @map("archived_at")
+  createdAt  DateTime  @default(now()) @map("created_at")
+  updatedAt  DateTime  @updatedAt @map("updated_at")
+
+  // search_vector is managed by PostgreSQL trigger, not Prisma
+  searchVector Unsupported("tsvector")?  @map("search_vector")
+
+  space    Space  @relation(fields: [spaceId], references: [id], onDelete: Cascade)
+  parent   Page?  @relation("PageToChildren", fields: [parentId], references: [id], onDelete: SetNull)
+  children Page[] @relation("PageToChildren")
+  author   User   @relation(fields: [authorId], references: [id])
+
+  versions        PageVersion[]
+  favorites       PageFavorite[]
+  comments        Comment[]
+  attachments     Attachment[]
+  tags            PageTag[]
+  inlineComments  InlineComment[]
+  pagePermissions PagePermission[]
+  outgoingLinks   PageLink[] @relation("OutgoingLinks")
+  incomingLinks   PageLink[] @relation("IncomingLinks")
+  watchers        PageWatch[]
+  views           PageView[]
+  chunks          PageChunk[]
+  reactions       PageReaction[]
+
+  @@unique([spaceId, slug])
+  @@index([deletedAt])
+  @@index([archivedAt])
+  @@map("pages")
+}
+
+model PageVersion {
+  id         String   @id @default(cuid())
+  pageId     String   @map("page_id")
+  title      String
+  content    Json
+  editedById String   @map("edited_by_id")
+  createdAt  DateTime @default(now()) @map("created_at")
+
+  page     Page @relation(fields: [pageId], references: [id], onDelete: Cascade)
+  editedBy User @relation(fields: [editedById], references: [id])
+
+  @@map("page_versions")
+}
+
+model PageFavorite {
+  id        String   @id @default(cuid())
+  pageId    String   @map("page_id")
+  userId    String   @map("user_id")
+  createdAt DateTime @default(now()) @map("created_at")
+
+  page Page @relation(fields: [pageId], references: [id], onDelete: Cascade)
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([pageId, userId])
+  @@map("page_favorites")
+}
+
+model Comment {
+  id        String   @id @default(cuid())
+  pageId    String   @map("page_id")
+  authorId  String   @map("author_id")
+  parentId  String?  @map("parent_id")
+  content   String
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  page    Page      @relation(fields: [pageId], references: [id], onDelete: Cascade)
+  author  User      @relation(fields: [authorId], references: [id])
+  parent  Comment?  @relation("CommentThread", fields: [parentId], references: [id], onDelete: Cascade)
+  replies Comment[] @relation("CommentThread")
+
+  @@map("comments")
+}
+
+model Attachment {
+  id           String   @id @default(cuid())
+  filename     String
+  originalName String   @map("original_name")
+  mimeType     String   @map("mime_type")
+  size         Int
+  path         String
+  textContent  String?  @map("text_content")
+  pageId       String?  @map("page_id")
+  spaceId      String   @map("space_id")
+  uploadedById String   @map("uploaded_by_id")
+  createdAt    DateTime @default(now()) @map("created_at")
+
+  page       Page?  @relation(fields: [pageId], references: [id], onDelete: SetNull)
+  space      Space  @relation(fields: [spaceId], references: [id], onDelete: Cascade)
+  uploadedBy User   @relation(fields: [uploadedById], references: [id])
+  chunks     AttachmentChunk[]
+
+  @@map("attachments")
+}
+
+model Activity {
+  id        String   @id @default(cuid())
+  type      String   // page-created, page-updated, page-deleted, comment-added
+  spaceId   String   @map("space_id")
+  pageId    String?  @map("page_id")
+  userId    String   @map("user_id")
+  metadata  Json     @default("{}")  // extra data (title, etc.)
+  createdAt DateTime @default(now()) @map("created_at")
+
+  user User @relation(fields: [userId], references: [id])
+
+  @@index([spaceId, createdAt])
+  @@map("activities")
+}
+
+model Tag {
+  id        String    @id @default(cuid())
+  name      String    @unique
+  color     String    @default("#6366f1") // indigo default
+  createdAt DateTime  @default(now()) @map("created_at")
+
+  pages PageTag[]
+
+  @@map("tags")
+}
+
+model PageTag {
+  id     String @id @default(cuid())
+  pageId String @map("page_id")
+  tagId  String @map("tag_id")
+
+  page Page @relation(fields: [pageId], references: [id], onDelete: Cascade)
+  tag  Tag  @relation(fields: [tagId], references: [id], onDelete: Cascade)
+
+  @@unique([pageId, tagId])
+  @@map("page_tags")
+}
+
+model Template {
+  id          String   @id @default(cuid())
+  title       String
+  description String?
+  icon        String?
+  content     Json     @default("{}")
+  category    String   @default("custom") // built-in, custom
+  createdById String   @map("created_by_id")
+  spaceId     String?  @map("space_id") // null = global template
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  createdBy User @relation(fields: [createdById], references: [id])
+
+  @@map("templates")
+}
+
+model InlineComment {
+  id         String   @id @default(cuid())
+  pageId     String   @map("page_id")
+  authorId   String   @map("author_id")
+  content    String
+  quote      String   // the selected text
+  resolved   Boolean  @default(false)
+  fromPos    Int      @map("from_pos")
+  toPos      Int      @map("to_pos")
+  createdAt  DateTime @default(now()) @map("created_at")
+  updatedAt  DateTime @updatedAt @map("updated_at")
+
+  page   Page @relation(fields: [pageId], references: [id], onDelete: Cascade)
+  author User @relation("InlineCommentAuthor", fields: [authorId], references: [id])
+
+  @@map("inline_comments")
+}
+
+model PagePermission {
+  id     String @id @default(cuid())
+  pageId String @map("page_id")
+  userId String @map("user_id")
+  role   Role   @default(VIEWER)
+
+  page Page @relation(fields: [pageId], references: [id], onDelete: Cascade)
+  user User @relation("PagePermissionUser", fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([pageId, userId])
+  @@map("page_permissions")
+}
+
+model PageLink {
+  id           String @id @default(cuid())
+  sourcePageId String @map("source_page_id")
+  targetPageId String @map("target_page_id")
+
+  sourcePage Page @relation("OutgoingLinks", fields: [sourcePageId], references: [id], onDelete: Cascade)
+  targetPage Page @relation("IncomingLinks", fields: [targetPageId], references: [id], onDelete: Cascade)
+
+  @@unique([sourcePageId, targetPageId])
+  @@map("page_links")
+}
+
+model PageWatch {
+  id        String   @id @default(cuid())
+  pageId    String   @map("page_id")
+  userId    String   @map("user_id")
+  createdAt DateTime @default(now()) @map("created_at")
+
+  page Page @relation(fields: [pageId], references: [id], onDelete: Cascade)
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([pageId, userId])
+  @@map("page_watches")
+}
+
+model PageView {
+  id        String   @id @default(cuid())
+  pageId    String   @map("page_id")
+  userId    String   @map("user_id")
+  createdAt DateTime @default(now()) @map("created_at")
+
+  page Page @relation(fields: [pageId], references: [id], onDelete: Cascade)
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([pageId, createdAt])
+  @@index([userId, createdAt])
+  @@map("page_views")
+}
+
+model Notification {
+  id        String   @id @default(cuid())
+  userId    String   @map("user_id")
+  type      String   // mention, page-updated, comment-added, page-watched-update
+  title     String
+  body      String?
+  pageId    String?  @map("page_id")
+  spaceSlug String?  @map("space_slug")
+  pageSlug  String?  @map("page_slug")
+  read      Boolean  @default(false)
+  createdAt DateTime @default(now()) @map("created_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, read, createdAt])
+  @@map("notifications")
+}
+
+model PageChunk {
+  id          String   @id @default(cuid())
+  pageId      String   @map("page_id")
+  chunkIndex  Int      @map("chunk_index")
+  heading     String?
+  content     String
+  contentHash String   @map("content_hash")
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @default(now()) @map("updated_at")
+
+  // embedding vector(1536) and search_vector tsvector managed by PostgreSQL
+  embedding    Unsupported("vector(1536)")?
+  searchVector Unsupported("tsvector")?  @map("search_vector")
+
+  page Page @relation(fields: [pageId], references: [id], onDelete: Cascade)
+
+  @@unique([pageId, chunkIndex])
+  @@map("page_chunks")
+}
+
+model AttachmentChunk {
+  id             String   @id @default(cuid())
+  attachmentId   String   @map("attachment_id")
+  chunkIndex     Int      @map("chunk_index")
+  content        String
+  contentHash    String   @map("content_hash")
+  createdAt      DateTime @default(now()) @map("created_at")
+  updatedAt      DateTime @default(now()) @map("updated_at")
+
+  embedding    Unsupported("vector(1536)")?
+  searchVector Unsupported("tsvector")?  @map("search_vector")
+
+  attachment Attachment @relation(fields: [attachmentId], references: [id], onDelete: Cascade)
+
+  @@unique([attachmentId, chunkIndex])
+  @@map("attachment_chunks")
+}
+
+model SearchQuery {
+  id            String    @id @default(cuid())
+  query         String
+  mode          String    @default("fulltext")
+  resultsCount  Int       @default(0) @map("results_count")
+  timingMs      Int       @default(0) @map("timing_ms")
+  expandedQuery String?   @map("expanded_query")
+  userId        String?   @map("user_id")
+  spaceId       String?   @map("space_id")
+  clickedPageId String?   @map("clicked_page_id")
+  clickedAt     DateTime? @map("clicked_at")
+  createdAt     DateTime  @default(now()) @map("created_at")
+
+  user User? @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@index([query])
+  @@index([createdAt])
+  @@index([userId])
+  @@map("search_queries")
+}
+
+model PageReaction {
+  id        String   @id @default(cuid())
+  pageId    String   @map("page_id")
+  userId    String   @map("user_id")
+  emoji     String
+  createdAt DateTime @default(now()) @map("created_at")
+
+  page Page @relation(fields: [pageId], references: [id], onDelete: Cascade)
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([pageId, userId, emoji])
+  @@map("page_reactions")
+}
+
+model LlmUsage {
+  id               String   @id @default(cuid())
+  timestamp        DateTime @default(now())
+  service          String
+  model            String
+  promptTokens     Int      @default(0) @map("prompt_tokens")
+  completionTokens Int      @default(0) @map("completion_tokens")
+  totalTokens      Int      @default(0) @map("total_tokens")
+  costUsd          Float    @default(0) @map("cost_usd")
+  durationMs       Int      @default(0) @map("duration_ms")
+  userId           String?  @map("user_id")
+  metadata         Json?
+
+  @@index([timestamp])
+  @@index([service, timestamp])
+  @@map("llm_usage")
+}
+
+model AuditLog {
+  id            String            @id @default(cuid())
+  timestamp     DateTime          @default(now())
+  userId        String?           @map("user_id")
+  userEmail     String            @map("user_email")
+  ipAddress     String?           @map("ip_address")
+  userAgent     String?           @map("user_agent")
+  action        AuditAction
+  resourceType  AuditResourceType @map("resource_type")
+  resourceId    String?           @map("resource_id")
+  resourceTitle String?           @map("resource_title")
+  spaceId       String?           @map("space_id")
+  changes       Json?
+  metadata      Json?
+
+  @@index([timestamp])
+  @@index([userId, timestamp])
+  @@index([action, timestamp])
+  @@index([resourceType, resourceId])
+  @@index([spaceId, timestamp])
+  @@map("audit_logs")
+}

@@ -1,0 +1,99 @@
+services:
+  nexus-postgres:
+    image: pgvector/pgvector:pg16
+    container_name: nexus-postgres
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-nexus}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-nexus_secret_change_me}
+      POSTGRES_DB: ${POSTGRES_DB:-nexus}
+    ports:
+      - "127.0.0.1:5433:5432"
+    volumes:
+      - nexus_pgdata:/var/lib/postgresql/data
+    networks:
+      - nexus-internal
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-nexus}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  nexus-redis:
+    image: redis:7-alpine
+    container_name: nexus-redis
+    command: redis-server --maxmemory 256mb --maxmemory-policy allkeys-lru
+    volumes:
+      - nexus_redis:/data
+    networks:
+      - nexus-internal
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  nexus-backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+      target: development
+    container_name: nexus-backend
+    env_file:
+      - .env.runtime
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-nexus}:${POSTGRES_PASSWORD:-nexus_secret_change_me}@nexus-postgres:5432/${POSTGRES_DB:-nexus}?connection_limit=25
+      PORT: 4000
+      UPLOAD_DIR: /uploads
+      REDIS_URL: redis://nexus-redis:6379
+    ports:
+      - "127.0.0.1:4000:4000"
+      - "127.0.0.1:4001:4001"
+    volumes:
+      - ./backend/src:/app/src
+      - ./backend/prisma:/app/prisma
+      - ./backend/templates:/app/templates
+      - nexus_uploads:/uploads
+    depends_on:
+      nexus-postgres:
+        condition: service_healthy
+      nexus-redis:
+        condition: service_healthy
+    networks:
+      - nexus-internal
+      - nexus-external
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:4000/api/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  nexus-frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      target: development
+    container_name: nexus-frontend
+    environment:
+      VITE_API_BASE_URL: /wiki/api
+    # No external port — accessible only via Nginx on External Directory (port 8443)
+    volumes:
+      - ./frontend/src:/app/src
+      - ./frontend/index.html:/app/index.html
+      - ./frontend/vite.config.ts:/app/vite.config.ts
+    depends_on:
+      nexus-backend:
+        condition: service_healthy
+    networks:
+      - nexus-internal
+      - nexus-external
+
+volumes:
+  nexus_pgdata:
+  nexus_uploads:
+  nexus_redis:
+
+networks:
+  nexus-internal:
+    driver: bridge
+  nexus-external:
+    external: true

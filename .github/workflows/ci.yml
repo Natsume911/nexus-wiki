@@ -1,0 +1,114 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  backend-tests:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: nexus_ci
+          POSTGRES_PASSWORD: ${{ secrets.CI_DB_PASSWORD || 'ci_test_only_pwd_2026' }}
+          POSTGRES_DB: nexus_ci
+        ports:
+          - 5433:5432
+        options: >-
+          --health-cmd "pg_isready -U nexus_ci"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    env:
+      DATABASE_URL: postgresql://nexus_ci:${{ secrets.CI_DB_PASSWORD || 'ci_test_only_pwd_2026' }}@localhost:5433/nexus_ci
+      NODE_ENV: test
+      DEV_USER_EMAIL: test@nexus.dev
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: backend/package-lock.json
+      - run: npm ci
+        working-directory: backend
+      - run: npx prisma generate
+        working-directory: backend
+      - run: npx prisma migrate deploy
+        working-directory: backend
+      - run: npm test
+        working-directory: backend
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: backend-coverage
+          path: backend/coverage/
+          retention-days: 7
+
+  e2e-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npx playwright install chromium
+        working-directory: frontend
+      - run: docker compose up --build --wait -d
+        timeout-minutes: 5
+      - run: npm ci --legacy-peer-deps
+        working-directory: frontend
+      - run: npx playwright test
+        working-directory: frontend
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: playwright-report
+          path: frontend/tests/report/
+          retention-days: 7
+      - run: docker compose down -v
+        if: always()
+
+  typecheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm ci
+        working-directory: backend
+      - run: npx prisma generate
+        working-directory: backend
+      - run: npx tsc --noEmit
+        working-directory: backend
+      - run: npm ci --legacy-peer-deps
+        working-directory: frontend
+      - run: npx tsc -b
+        working-directory: frontend
+
+  security:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm ci
+        working-directory: backend
+      - run: npm audit --audit-level=high || true
+        working-directory: backend
+      - run: npm ci --legacy-peer-deps
+        working-directory: frontend
+      - run: npm audit --audit-level=high || true
+        working-directory: frontend
+      # Check for hardcoded secrets
+      - run: |
+          echo "Checking for hardcoded secrets..."
+          ! grep -rn "sk-proj-\|AKIA\|password.*=.*['\"]" backend/src/ frontend/src/ --include="*.ts" --include="*.tsx" | grep -v "change_me\|placeholder\|example\|CHANGE" || true
